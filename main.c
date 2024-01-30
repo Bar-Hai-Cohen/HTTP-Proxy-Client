@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <errno.h>
 
 
 // Define a structure for a node in the linked list
@@ -16,7 +17,10 @@ typedef struct Node {
     struct Node *next;
 } Node;
 
-struct hostent* server_info=NULL;
+typedef uint16_t in_port_t;
+struct hostent *server_info = NULL;
+
+int lenUrl;
 
 // Declare global variable for the linked list
 Node *pathList;
@@ -24,26 +28,63 @@ Node *pathList;
 // Declare global variables for storing URL components
 char *protocol, *hostname, *port, *filepath;
 
+// Function to build a path from a hostname and linked list of path segments
+char *buildPath(const char *hostname, Node *pathList) {
+    char *currentPath = malloc(lenUrl);
+    if (currentPath == NULL) {
+        perror("Memory allocation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    memset(currentPath, 0, lenUrl);
+    strcat(currentPath, hostname);
+
+    int flag_First_in_list = 0;
+
+    // Iterate through the linked list and check subdirectories
+    Node *current = pathList;
+    while (current != NULL) {
+        if (flag_First_in_list != 0) {
+            // Use platform-independent path separator
+            strcat(currentPath, "/");
+        }
+        flag_First_in_list++;
+
+        // Check the combined length before concatenating
+        if (strlen(currentPath) + strlen(current->value) < lenUrl) {
+            strcat(currentPath, current->value);
+        } else {
+            fprintf(stderr, "Path length exceeds maximum limit.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        current = current->next;
+    }
+
+    // The last segment in the path list is assumed to be a file
+    // Append the last segment to the current path
+    if (current != NULL) {
+        // Check the combined length before concatenating
+        if (strlen(currentPath) + strlen(current->value) < lenUrl) {
+            strcat(currentPath, current->value);
+        } else {
+            fprintf(stderr, "Path length exceeds maximum limit.\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    return currentPath;
+}
+
 /**
- * @brief Constructs an HTTP request based on the options specified in the command line.
+ * @brief Sends an HTTP request to the server and receives the response.
  *
  * @param hostname The hostname of the server.
- * @param port The port number for the server.
+ * @param port1 The port number for the server.
  * @param filepath The filepath of the requested resource.
- * @return The constructed HTTP request string.
+ * @param localFilePath The path where the received file should be saved locally.
  */
-char *constructHTTPRequest(const char *hostname, int port, const char *filepath) {
-    // Allocate memory for the HTTP request string
-    char *request = (char *) malloc(512);
-
-    // Construct the HTTP request string
-    snprintf(request, 512,
-             "GET %s HTTP/1.0\r\n"
-             "Host: %s:%d\r\n"
-             "\r\n", filepath, hostname, port);
-
-    return request;
-}
+// Function to send an HTTP request to the server and receive the response
 
 /**
  * @brief Sends an HTTP request to the server and receives the response.
@@ -51,13 +92,13 @@ char *constructHTTPRequest(const char *hostname, int port, const char *filepath)
  * @param hostname The hostname of the server.
  * @param port The port number for the server.
  * @param filepath The filepath of the requested resource.
- * @param localFilePath The path where the received file should be saved locally.
  */
-// Function to send an HTTP request to the server and receive the response
 void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, const char *filepath) {
     // Construct HTTP request
     char request[1024];  // Adjust the size as needed
     sprintf(request, "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n", filepath, hostname);
+
+    in_port_t port1 = atoi(port);
 
     // Print the HTTP request
     printf("HTTP request =\n%s\nLEN = %zu\n", request, strlen(request));
@@ -76,21 +117,20 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
         exit(EXIT_FAILURE);
     }
 
-
     struct sockaddr_in serverAddr;
-    memset(&serverAddr,0,sizeof (struct sockaddr_in));
+    memset(&serverAddr, 0, sizeof(struct sockaddr_in));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
+    serverAddr.sin_port = htons(port1);
     // Set the server address using the first IP address from the hostent structure
-    serverAddr.sin_addr.s_addr = ((struct in_addr *)server_info->h_addr)->s_addr;
+    serverAddr.sin_addr.s_addr = ((struct in_addr *) server_info->h_addr)->s_addr;
 
     // Connect to the server
-    if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1) {
+    if (connect(sockfd, (struct sockaddr *) &serverAddr, sizeof(serverAddr)) == -1) {
         perror("Connection to server failed");
+        fprintf(stderr, "Error code: %d\n", errno);  // Add this line to print the error code
         close(sockfd);
         exit(EXIT_FAILURE);
     }
-
 
     // Send the HTTP request to the server
     if (send(sockfd, request, strlen(request), 0) == -1) {
@@ -99,33 +139,111 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
         exit(EXIT_FAILURE);
     }
 
-    // Receive an HTTP response
-    char response[1024];  // Adjust the size as needed
-    ssize_t bytesRead = recv(sockfd, response, sizeof(response) - 1, 0);
-    if (bytesRead == -1) {
-        perror("Failed to receive HTTP response");
-        close(sockfd);
-        exit(EXIT_FAILURE);
+    int headerRead = 0;  // Flag to indicate whether the header has been fully read
+    int bytesRead = 0;
+    int totalBytesRead = 0;
+    char response[8192];
+    int contentLength = 0;
+    // Open the file
+    FILE *file = NULL;
+    char *currentPath = NULL;
+
+    // Loop to receive the response
+    while ((bytesRead = recv(sockfd, response, sizeof(response) - 1, 0)) > 0) {
+        response[bytesRead] = '\0';
+
+        // Print everything received to the screen
+        printf("%s", response);
+
+        // If the header has not been fully read, check for the end of the header
+        if (!headerRead) {
+            char *headerEnd = strstr(response, "\r\n\r\n");
+            if (headerEnd != NULL) {
+                // The header is fully read
+                headerRead = 1;
+
+                // Extract the status and content length from the header
+                char *statusStart = response + 9;  // Assuming "HTTP/1.x " is at the beginning
+                int statusCode = atoi(statusStart);
+
+                if (statusCode == 404) {
+                    printf("File does not exist (HTTP 404 Not Found)\n");
+                    close(sockfd);
+                    exit(EXIT_FAILURE);
+                } else if (statusCode == 200) {
+                    char *contentLengthStart = strstr(response, "Content-Length: ");
+                    if (contentLengthStart != NULL) {
+                        contentLengthStart += 16;  // Move to the beginning of the content length value
+                        contentLength = atoi(contentLengthStart);
+                        printf("Content Length: %zu\n", contentLength);
+
+                        // Open the file
+                        file = NULL;
+                        if (strcmp(filepath, "/") == 0) {
+                            file = fopen(hostname, "w");
+                            printf("File saved locally: %s\n", hostname);
+                            currentPath=hostname;
+                        } else {
+                            currentPath = buildPath(hostname, pathList);
+                            file = fopen(currentPath, "w");
+                            printf("File saved locally: %s\n", currentPath);
+                        }
+
+                        if (file == NULL) {
+                            perror("Error opening file for writing");
+                            close(sockfd);
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Write everything received to the file
+        fwrite(response, 1, bytesRead, file);
+
+        // Update total response bytes
+        totalBytesRead += bytesRead;
+
+        // If the content length is known and reached, break the loop
+        if (contentLength > 0 && totalBytesRead >= contentLength) {
+            break;
+        }
     }
 
-    response[bytesRead] = '\0';
+    printf("File saved locally: %s\n", currentPath);
 
-    // Save the file locally
-    FILE *file = fopen(filepath, "w");
-    if (file == NULL) {
-        perror("Error opening file for writing");
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
+//    // Save the file locally
+//    FILE *file = NULL;
+//    char *currentPath = NULL;
+//
+//    if (strcmp(filepath, "/") == 0) {
+//        file = fopen(hostname, "w");
+//        currentPath = strdup(hostname);
+//    } else {
+//        currentPath = buildPath(hostname, pathList);
+//        file = fopen(currentPath, "w");
+//    }
+//
+//    if (file == NULL) {
+//        perror("Error opening file for writing");
+//        close(sockfd);
+//        free(currentPath);
+//        exit(EXIT_FAILURE);
+//    }
+//
+//    // Write the remaining part of the response to the file
+//    size_t remainingBytes = totalBytesRead - (contentLengthHeader - response + 15);
+//    fwrite(contentLengthHeader + 15, 1, remainingBytes, file);
 
-    fprintf(file, "%s", response);
     fclose(file);
-
-    // Close the socket
     close(sockfd);
-
-    printf("File saved locally: %s\n", filepath);
+    if(strcmp(filepath,"/")==0){
+        return;
+    }
+    free(currentPath);
 }
+
 
 /**
  * @brief Splits a path and stores each segment in a linked list.
@@ -343,6 +461,7 @@ void freePathList() {
     pathList = NULL;
 }
 
+
 /**
  * @brief Generates an HTTP response for a file.
  *
@@ -400,41 +519,31 @@ void generateHTTPResponse(const char *filePath) {
  * @param pathList Linked list representing the internal folders.
  */
 void checkDirectoryExistence(const char *hostname, Node *pathList) {
-    char currentPath[256];  // Start with the current directory
-    memset(currentPath, 0, 256);
-    strcat(currentPath, hostname);
-
-//    // Check if the top-level directory exists
-//    if (access(currentPath, F_OK) == -1) {
-//        printf("Directory does not exist: %s\n", currentPath);
-//        return;
+//    char currentPath[lenUrl];  // Start with the current directory
+//    memset(currentPath, 0, lenUrl);
+//    strcat(currentPath, hostname);
+//
+//    int flag_First_in_list = 0;  // check if is the first in the liked-list , if yes ,do not add another /
+//
+//    // Iterate through the linked list and check subdirectories
+//    Node *current = pathList;
+//    while (current != NULL) {
+//        if (flag_First_in_list != 0) {
+//            strcat(currentPath, "/");
+//        }
+//        flag_First_in_list++;
+//        strcat(currentPath, current->value);
+//
+//        current = current->next;
+//    }
+//
+//    // The last segment in the path list is assumed to be a file
+//    // Append the last segment to the current path
+//    if (current != NULL) {
+//        strcat(currentPath, current->value);
 //    }
 
-    int flag_First_in_list = 0;  // check if is the first in the liked-list , if yes ,do not add another /
-
-    // Iterate through the linked list and check subdirectories
-    Node *current = pathList;
-    while (current != NULL) {
-        if (flag_First_in_list != 0) {
-            strcat(currentPath, "/");
-        }
-        flag_First_in_list++;
-        strcat(currentPath, current->value);
-
-//        // Check if the subdirectory exists
-//        if (access(currentPath, F_OK) == -1) {
-//            printf("Directory does not exist: %s\n", currentPath);
-//            return;
-//        }
-
-        current = current->next;
-    }
-
-    // The last segment in the path list is assumed to be a file
-    // Append the last segment to the current path
-    if (current != NULL) {
-        strcat(currentPath, current->value);
-    }
+    char *currentPath = buildPath(hostname, pathList);
 
     // Check if the file exists locally
     if (access(currentPath, F_OK) == -1) {
@@ -454,6 +563,8 @@ int main() {
 //    const char *url = "http://www.yoyo.com:1234/pub/files/fo1.html";
 
     const char *url = "http://www.josephwcarrillo.com";
+
+    lenUrl = strlen(url);
 
 
 
