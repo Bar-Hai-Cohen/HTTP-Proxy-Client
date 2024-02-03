@@ -1,15 +1,14 @@
 HTTP/1.1 200 OK
-Date: Tue, 30 Jan 2024 21:21:14 GMT
+Date: Sat, 03 Feb 2024 22:54:56 GMT
 Server: Apache/2.4.56 (Debian)
 Upgrade: h2,h2c
 Connection: Upgrade, close
-Last-Modified: Tue, 30 Jan 2024 05:36:30 GMT
-ETag: "6f12-6102324fca833"
+Last-Modified: Fri, 02 Feb 2024 05:43:26 GMT
+ETag: "6f12-6105f9747058f"
 Accept-Ranges: bytes
 Content-Length: 28434
 Vary: Accept-Encoding
-Cache-Control: max-age=10, public
-Content-Type: text/html; charset=utf-8
+Content-Type: text/html
 
 <!doctype html>
 <html lang="en" prefix="og: http://ogp.me/ns#">

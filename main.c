@@ -10,7 +10,6 @@
 #include <netdb.h>
 #include <errno.h>
 
-
 // Define a structure for a node in the linked list
 typedef struct Node {
     char *value;
@@ -19,19 +18,40 @@ typedef struct Node {
 
 typedef uint16_t in_port_t;
 struct hostent *server_info = NULL;
-
 int lenUrl;
+int saveLocally=1;
 
 // Declare global variable for the linked list
 Node *pathList;
 
 // Declare global variables for storing URL components
-char *protocol, *hostname, *port, *filepath;
+char *protocol, *hostname, *port, *filepath,*currentPath ;
+
+/**
+ * @brief Frees the memory allocated for the linked list.
+ */
+void freePathList() {
+    Node *current = pathList;
+    while (current != NULL) {
+        Node *temp = current;
+        current = current->next;
+        free(temp->value);
+        free(temp);
+    }
+    pathList = NULL;
+}
 
 // Function to build a path from a hostname and linked list of path segments
 char *buildPath(const char *hostname, Node *pathList) {
-    char *currentPath = malloc(lenUrl);
+    currentPath = malloc(lenUrl);
     if (currentPath == NULL) {
+        // Free allocated memory
+        free(currentPath);
+        free(hostname);
+        free(port);
+        free(filepath);
+        // Free memory allocated for the linked list
+        freePathList();
         perror("Memory allocation failed");
         exit(EXIT_FAILURE);
     }
@@ -54,6 +74,12 @@ char *buildPath(const char *hostname, Node *pathList) {
         if (strlen(currentPath) + strlen(current->value) < lenUrl) {
             strcat(currentPath, current->value);
         } else {
+            // Free allocated memory
+            free(hostname);
+            free(port);
+            free(filepath);
+            // Free memory allocated for the linked list
+            freePathList();
             fprintf(stderr, "Path length exceeds maximum limit.\n");
             exit(EXIT_FAILURE);
         }
@@ -77,14 +103,21 @@ char *buildPath(const char *hostname, Node *pathList) {
 }
 
 /**
- * @brief Sends an HTTP request to the server and receives the response.
+ * @brief Opens the URL in the default web browser.
  *
- * @param hostname The hostname of the server.
- * @param port1 The port number for the server.
- * @param filepath The filepath of the requested resource.
- * @param localFilePath The path where the received file should be saved locally.
+ * @param url The URL to be opened in the browser.
  */
-// Function to send an HTTP request to the server and receive the response
+void openInBrowser(const char *url) {
+    // Use a system command to open the default web browser
+    char command[256];
+    snprintf(command, sizeof(command), "xdg-open http://%s", url);
+
+    if (system(command) == -1) {
+        perror("Error opening in the browser");
+        exit(EXIT_FAILURE);
+    }
+}
+
 
 /**
  * @brief Sends an HTTP request to the server and receives the response.
@@ -142,7 +175,7 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
     int headerRead = 0;  // Flag to indicate whether the header has been fully read
     int bytesRead = 0;
     int totalBytesRead = 0;
-    char response[8192];
+    unsigned char response[8192];
     int contentLength = 0;
     // Open the file
     FILE *file = NULL;
@@ -152,8 +185,7 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
     while ((bytesRead = recv(sockfd, response, sizeof(response) - 1, 0)) > 0) {
         response[bytesRead] = '\0';
 
-        // Print everything received to the screen
-        printf("%s", response);
+
 
         // If the header has not been fully read, check for the end of the header
         if (!headerRead) {
@@ -169,6 +201,12 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
                 if (statusCode == 404) {
                     printf("File does not exist (HTTP 404 Not Found)\n");
                     close(sockfd);
+                    // Free allocated memory
+                    free(hostname);
+                    free(port);
+                    free(filepath);
+                    // Free memory allocated for the linked list
+                    freePathList();
                     exit(EXIT_FAILURE);
                 } else if (statusCode == 200) {
                     char *contentLengthStart = strstr(response, "Content-Length: ");
@@ -182,7 +220,7 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
                         if (strcmp(filepath, "/") == 0) {
                             file = fopen(hostname, "w");
                             printf("File saved locally: %s\n", hostname);
-                            currentPath=hostname;
+                            currentPath = hostname;
                         } else {
                             currentPath = buildPath(hostname, pathList);
                             file = fopen(currentPath, "w");
@@ -209,41 +247,32 @@ void sendHTTPRequestAndReceiveResponse(const char *hostname, const char *port, c
         if (contentLength > 0 && totalBytesRead >= contentLength) {
             break;
         }
+
+        // Print everything received to the screen
+        printf("%s", response);
     }
+
+    char responseHeader[1024];  // Adjust the size as needed
+    sprintf(responseHeader, "HTTP/1.0 200 OK\r\nContent-Length: %ld\r\n\r\n", contentLength);
+
+    // Print total response bytes
+    printf("\nTotal response bytes: %zu\n", contentLength + strlen(responseHeader));
 
     printf("File saved locally: %s\n", currentPath);
 
-//    // Save the file locally
-//    FILE *file = NULL;
-//    char *currentPath = NULL;
-//
-//    if (strcmp(filepath, "/") == 0) {
-//        file = fopen(hostname, "w");
-//        currentPath = strdup(hostname);
-//    } else {
-//        currentPath = buildPath(hostname, pathList);
-//        file = fopen(currentPath, "w");
-//    }
-//
-//    if (file == NULL) {
-//        perror("Error opening file for writing");
-//        close(sockfd);
-//        free(currentPath);
-//        exit(EXIT_FAILURE);
-//    }
-//
-//    // Write the remaining part of the response to the file
-//    size_t remainingBytes = totalBytesRead - (contentLengthHeader - response + 15);
-//    fwrite(contentLengthHeader + 15, 1, remainingBytes, file);
 
     fclose(file);
     close(sockfd);
-    if(strcmp(filepath,"/")==0){
+    if (saveLocally == 1) {
+        openInBrowser(currentPath);
+    }
+    if (strcmp(filepath, "/") == 0) {
+        //free(currentPath);
         return;
     }
-    free(currentPath);
-}
 
+    //free(currentPath);
+}
 
 /**
  * @brief Splits a path and stores each segment in a linked list.
@@ -323,15 +352,15 @@ void splitAndStorePath(const char *path) {
 void splitURL(const char *url) {
     // Find the position of "://"
     const char *protocolEnd = strstr(url, "://");
+    const char *protocol = "http://";
+    if(strcmp(protocol,"http://")!=0){
+        fprintf(stderr, "Invalid URL format: %s\n", url);
+        exit(EXIT_FAILURE);
+    }
     if (protocolEnd == NULL) {
         fprintf(stderr, "Invalid URL format: %s\n", url);
         exit(EXIT_FAILURE);
     }
-
-    // Extract protocol
-    protocol = malloc(protocolEnd - url + 1);
-    strncpy(protocol, url, protocolEnd - url);
-    protocol[protocolEnd - url] = '\0';
 
     // Move to the hostname part
     const char *hostnameStart = protocolEnd + 3;
@@ -359,20 +388,12 @@ void splitURL(const char *url) {
                 }
             }
 
-            // If the port contains non-digit characters, set it to "80"
+            // If the port contains non-digit characters, throw an error
             if (!isDigit) {
-                port = malloc(3);
-                strcpy(port, "80");
-                // Extract filepath
-                filepath = malloc(strlen(portEnd) + 1);
-                strcpy(filepath, portEnd);
-                // Call splitAndStorePath to store path segments in the linked list
-                splitAndStorePath(filepath);
-                return;
+                fprintf(stderr, "Invalid port format: %.*s\n", (int) (portEnd - portStart), portStart);
+                exit(EXIT_FAILURE);
             }
-        }
 
-        if (portEnd != NULL) {
             // Extract port
             port = malloc(portEnd - portStart);
             strncpy(port, portStart + 1, portEnd - portStart - 1);
@@ -382,13 +403,9 @@ void splitURL(const char *url) {
             filepath = malloc(strlen(portEnd) + 1);
             strcpy(filepath, portEnd);
         } else {
-            // No slash after port, extract the rest as the port
-            port = malloc(strlen(portStart + 1) + 1);
-            strcpy(port, portStart + 1);
-
-            // Set filepath to "/"
-            filepath = malloc(2);
-            strcpy(filepath, "/");
+            // No slash after port, throw an error
+            fprintf(stderr, "Invalid port format: %s\n", portStart);
+            exit(EXIT_FAILURE);
         }
     } else {
         // No port specified or port appears after a slash
@@ -411,11 +428,13 @@ void splitURL(const char *url) {
             // Check for colon (:) without a number until the first "/"
             const char *colonStart = strchr(hostnameStart, ':');
             if (colonStart != NULL && (pathStart == NULL || colonStart < pathStart)) {
+                // Colon without a number after it, throw an error
+                fprintf(stderr, "Invalid port format: %s\n", colonStart);
+                exit(EXIT_FAILURE);
+            } else {
+                // No port, set to "80"
                 port = malloc(3);
                 strcpy(port, "80");
-            } else {
-                port = malloc(1);
-                port[0] = '\0';
             }
 
             // Set filepath to "/"
@@ -424,16 +443,10 @@ void splitURL(const char *url) {
         }
     }
 
-    // Check if the port length is zero, then set it to "80"
-    if (strlen(port) == 0) {
-        free(port);
-        port = malloc(3);
-        strcpy(port, "80");
-    }
-
     // Call splitAndStorePath to store path segments in the linked list
     splitAndStorePath(filepath);
 }
+
 
 /**
  * @brief Prints and displays the values in the linked list.
@@ -445,20 +458,6 @@ void printPathList() {
         printf("%s\n", current->value);
         current = current->next;
     }
-}
-
-/**
- * @brief Frees the memory allocated for the linked list.
- */
-void freePathList() {
-    Node *current = pathList;
-    while (current != NULL) {
-        Node *temp = current;
-        current = current->next;
-        free(temp->value);
-        free(temp);
-    }
-    pathList = NULL;
 }
 
 
@@ -500,13 +499,21 @@ void generateHTTPResponse(const char *filePath) {
         totalBytes += bytesRead;  // Update total response bytes
     }
 
+    //TODO:CHEECK IF ALSO PRINT AND ALSO OPEN
+    if (saveLocally == 1) {
+        openInBrowser(filePath);
+    }
+
+
     // Close the file
     fclose(file);
 
-    // Print total response bytes
-    printf("\nTotal response bytes: %zu\n", totalBytes);
-}
+    char responseHeader[1024];  // Adjust the size as needed
+    sprintf(responseHeader, "HTTP/1.0 200 OK\r\nContent-Length: %ld\r\n\r\n", fileSize);
 
+    // Print total response bytes
+    printf("\nTotal response bytes: %zu\n", totalBytes + strlen(responseHeader));
+}
 
 /**
  * @brief Checks if the specified directory structure exists.
@@ -519,29 +526,6 @@ void generateHTTPResponse(const char *filePath) {
  * @param pathList Linked list representing the internal folders.
  */
 void checkDirectoryExistence(const char *hostname, Node *pathList) {
-//    char currentPath[lenUrl];  // Start with the current directory
-//    memset(currentPath, 0, lenUrl);
-//    strcat(currentPath, hostname);
-//
-//    int flag_First_in_list = 0;  // check if is the first in the liked-list , if yes ,do not add another /
-//
-//    // Iterate through the linked list and check subdirectories
-//    Node *current = pathList;
-//    while (current != NULL) {
-//        if (flag_First_in_list != 0) {
-//            strcat(currentPath, "/");
-//        }
-//        flag_First_in_list++;
-//        strcat(currentPath, current->value);
-//
-//        current = current->next;
-//    }
-//
-//    // The last segment in the path list is assumed to be a file
-//    // Append the last segment to the current path
-//    if (current != NULL) {
-//        strcat(currentPath, current->value);
-//    }
 
     char *currentPath = buildPath(hostname, pathList);
 
@@ -558,6 +542,49 @@ void checkDirectoryExistence(const char *hostname, Node *pathList) {
     }
 }
 
+//int main(int argc, char *argv[]) {
+//    // Check if the correct number of arguments is provided
+//    if (argc < 2 || argc > 3) {
+//        fprintf(stderr, "Usage: %s <url> [-s]\n", argv[0]);
+//        exit(EXIT_FAILURE);
+//    }
+//
+//    // Extract arguments
+//    const char *url = argv[1];
+//    saveLocally = (argc == 3 && strcmp(argv[2], "-s") == 0); // If saveLocally is 1, it means the "-s" flag is present in the command line, and the program should save the file locally.
+//
+//    lenUrl = strlen(url);
+//
+//    // Split the URL
+//    splitURL(url);
+//
+//    // Print original components
+//    printf("Original Components:\n");
+//    printf("Protocol: %s\n", protocol);
+//    printf("Hostname: %s\n", hostname);
+//    printf("Port: %s (Length: %zu)\n", port, strlen(port));
+//    printf("Filepath: %s\n", filepath);
+//
+//    // Display stored path segments
+//    printPathList();
+//
+//    // Check directory existence or send HTTP request based on the -s flag
+//    if (saveLocally) {
+//        checkDirectoryExistence(hostname, pathList);
+//    } else {
+//        sendHTTPRequestAndReceiveResponse(hostname, port, filepath);
+//    }
+//
+//    // Free allocated memory
+//    free(hostname);
+//    free(port);
+//    free(filepath);
+//
+//    // Free memory allocated for the linked list
+//    freePathList();
+//
+//    return 0;
+//}
 
 int main() {
 //    const char *url = "http://www.yoyo.com:1234/pub/files/fo1.html";
@@ -565,8 +592,6 @@ int main() {
     const char *url = "http://www.josephwcarrillo.com";
 
     lenUrl = strlen(url);
-
-
 
     // Split the URL
     splitURL(url);
@@ -585,10 +610,10 @@ int main() {
     checkDirectoryExistence(hostname, pathList);
 
     // Free allocated memory
-    free(protocol);
     free(hostname);
     free(port);
     free(filepath);
+    free(currentPath);
 
     // Free memory allocated for the linked list
     freePathList();
